@@ -1,0 +1,218 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from datetime import datetime
+
+# 주식 바스켓 가져오기
+import pandas_datareader.data as pdr
+# 삼성전자, sk하이닉스, 현대모비스, 한솔케미칼
+#assets = ['005930.KS', '000660.KS', '012330.KS', '014680.KS']
+assets = ['AAPL', 'MSFT', 'TSLA', 'DB', 'GLD']
+noa = len(assets) # 자산 수
+
+start = '2019-1-1'
+end = '2019-12-31'
+
+df = pd.DataFrame()
+for stock in assets:
+    df[stock] = pdr.DataReader(stock, 'yahoo', start, end)['Adj Close']
+
+df.index = pd.to_datetime(df.index) # ValueError 해결
+
+# 주가 추이
+(df / df.iloc[0] * 100).plot(figsize=(16, 8), grid=True)
+plt.show()
+#print(df.iloc[0]) # start 시기 주가
+
+# 수익률 계산
+rets = np.log(df / df.shift(1)) # log 수익률
+rets_cov = rets.cov() * 252 # 연 공분산
+sns.heatmap(rets_cov, annot=True)
+plt.show()
+
+# 포트폴리오 이론
+np.random.seed(2) # 난수생성
+weights = np.random.random(noa)
+weights /= np.sum(weights)
+#print(weights)
+
+np.sum(rets.mean() * weights) * 252
+np.dot(weights.T, np.dot(rets.cov() * 252, weights))
+np.sqrt(np.dot(weights.T, np.dot(rets.cov() * 252, weights)))
+
+
+# 포트폴리오 수익률 시뮬레이션
+prets = []
+pvols = []
+for p in range (2500):
+    weights = np.random.random(noa)
+    weights /= np.sum(weights)
+    prets.append(np.sum(rets.mean() * weights) * 252)
+    pvols.append(np.sqrt(np.dot(weights.T, np.dot(rets.cov() * 252, weights))))
+prets = np.array(prets)
+pvols = np.array(pvols)
+
+# Efficient Frontier 시각화
+plt.scatter(pvols, prets, c=prets/pvols, marker='o', cmap=plt.cm.jet) # shap ratio
+# x축, y축, c: color, iterable한 자료의 경우 각 마커마다 다른 색상 설정 가능 , o: marker
+plt.grid(True)
+plt.xlabel('expected volatility')
+plt.ylabel('expected return')
+plt.colorbar(label='Sharpe ratio')
+plt.show()
+
+
+# 포트폴리오 통계
+def statistics(weights):
+    weights = np.array(weights) # 비중
+    pret = np.sum(rets.mean() * weights) * 252 # 포트 연수익률
+    pvol = np.sqrt(np.dot(weights.T, np.dot(rets.cov() * 252, weights))) # 포트 연표준편차
+    return np.array([pret, pvol, pret/pvol]) # return, std, sharp ratio
+
+# sharp ratio maximization
+import scipy.optimize as sco
+
+def min_func_sharpe(weights):
+    return -statistics(weights)[2] # sharpe ratio
+
+cons = {'type': 'eq', 'fun': lambda x: np.sum(x) - 1} # constraints
+bnds = tuple((0,1) for x in range(noa)) # bounds
+noa*[1. / noa,] # equal weights
+# x0 : ndarray, shape (n,). Initial guess. Array of real elements of size (n,), where 'n' is the number of independent variables.
+
+
+# 최적화
+opts = sco.minimize(min_func_sharpe, noa*[1. / noa,], method='SLSQP', bounds=bnds, constraints=cons)
+#print(opts)
+#print(opts['x'].round(3)) # optimal weights
+#print(statistics(opts['x']).round(3)) # ret, stv, sharpe ratio
+
+plt.scatter(pvols, prets, c=prets/pvols, marker='o', cmap=plt.cm.jet)
+plt.grid(True)
+plt.xlabel('expected volatility')
+plt.ylabel('expected return')
+plt.colorbar(label='Sharpe ratio')
+
+pt_opts = statistics(opts['x']).round(3)
+plt.scatter(pt_opts[1], pt_opts[0], marker="*", s=500, alpha=0.5) # s : size, alpha : 색상 투명도
+plt.show()
+
+
+# 포트폴리오 분산 최소화
+def min_func_variance(weights):
+    return statistics(weights)[1] ** 2 # port_variance
+
+optv = sco.minimize(min_func_variance, noa * [1. / noa, ], method='SLSQP', bounds=bnds, constraints=cons)
+
+plt.scatter(pvols, prets, c=prets/pvols, marker='o', cmap=plt.cm.jet)
+plt.grid(True)
+plt.xlabel('expected volatility')
+plt.ylabel('expected return')
+plt.colorbar(label='sharp ratio')
+
+pt_optv = statistics(optv['x']).round(3)
+plt.scatter(pt_optv[1], pt_optv[0], marker='*', s=500, alpha=0.5)
+plt.show()
+
+
+# 효율적 투자선(Efficient Frontier) : 목표 위험 수준에 대해 최대 수익률을 가지는 모든 포트폴리오의 집합
+cons = ({'type': 'eq', 'fun': lambda x:  statistics(x)[0] - tret},
+        {'type': 'eq', 'fun': lambda x:  np.sum(x) - 1})
+bnds = tuple((0, 1) for x in weights)
+
+def min_func_port(weights):
+    return statistics(weights)[1] # std
+
+trets = np.linspace(0.0, 0.25, 50) # 구간 나누기
+tvols = []
+for tret in trets:
+    cons = ({'type': 'eq', 'fun': lambda x: statistics(x)[0] - tret},
+            {'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
+    res = sco.minimize(min_func_port, noa * [1. / noa,], method='SLSQP',
+                       bounds=bnds, constraints=cons)
+    tvols.append(res['fun'])
+tvols = np.array(tvols)
+
+plt.scatter(pvols, prets,
+            c=prets / pvols, marker='o', cmap=plt.cm.jet) # 무작위 포트폴리오
+plt.scatter(tvols, trets,
+            c=trets / tvols, marker='x', s=70, linewidth=2, cmap=plt.cm.jet) # 효율적 투자선
+plt.plot(statistics(opts['x'])[1], statistics(opts['x'])[0],
+         'r*', markersize=30) # 최대 샤프 지수를 가진 포트폴리오
+plt.plot(statistics(optv['x'])[1], statistics(optv['x'])[0],
+         'y*', markersize=30) # 최소 분산 포트폴리오
+plt.grid(True)
+plt.xlabel('expected volatility')
+plt.ylabel('expected return')
+plt.colorbar(label='Sharpe ratio')
+plt.show()
+
+
+# 스플라인 함수화
+import scipy.interpolate as sci
+
+ind = np.argmin(tvols) # 최소값의 인덱스
+evols = tvols[ind:]
+erets = trets[ind:]
+
+tck = sci.splrep(evols, erets) # 스플라인 보간 모형(representation) 생성
+
+def f(x):
+    ''' 효율적 투자선 함수 (스플라인 근사) '''
+    return sci.splev(x, tck, der=0) # 만들어진 스플라인 보간 모형을 이용하여 새로운 x 값에 대해 y값 계산 (evaluation)
+
+def df(x):
+    ''' 효율적 투자선 함수의 1차 도함수 '''
+    return sci.splev(x, tck, der=1)
+
+plt.scatter(pvols, prets, c=prets / pvols, marker='o', cmap=plt.cm.jet) # 무작위 포트폴리오
+
+plt.plot(evols, f(evols), lw=7, alpha=0.5) # 스플라인 함수
+
+plt.grid(True)
+plt.xlabel('expected volatility')
+plt.ylabel('expected return')
+plt.colorbar(label='Sharpe ratio')
+plt.show()
+
+
+# 자본시장선; EF와 접하는 rf 절편에서 그은 직선
+'''
+자본시장선¶
+무위험 자산을 포함한 최적 포트폴리오 집합
+무위험 자산을 지나며 효율적 투자선  f(x) 에 접하는 직선  t(x) 
+t(x)=a+bx
+ 
+t(0)=rf ---> eq1
+ 
+t(x)=f(x) ---> eq2
+ 
+t′(x)=f′(x) ---> eq3
+'''
+# 무위험 자산을 포함한 최적 포트폴리오 집합
+# 무위험 자산을 지나며 효율적 투자선에 접하는 직선
+def equations(p, rf=0.01):
+    eq1 = rf - p[0]
+    eq2 = rf + p[1] * p[2] - f(p[2])
+    eq3 = p[1] - df(p[2])
+    return eq1, eq2, eq3
+
+opt = sco.fsolve(equations, [0.01, 1.0, 0.1]) # Find the roots of a function; equations 함수의 해 찾기
+np.round(equations(opt), 6)
+print(opt) # p = opt = ([a, b, x])
+
+# 시각화
+plt.scatter(pvols, prets,
+            c=(prets - 0.01) / pvols, marker='o', cmap=plt.cm.jet) # 무작위 포트폴리오
+plt.plot(evols, erets, 'g', lw=6, alpha=0.8) # 효율적 투자선
+cx = np.linspace(0.0, 0.3)
+plt.plot(cx, opt[0] + opt[1] * cx, lw=2, alpha=0.8) # 자본 시장선
+plt.plot(opt[2], f(opt[2]), 'r*', markersize=25.0)
+plt.grid(True)
+plt.axhline(0, color='k', ls='--', lw=2.0)
+plt.axvline(0, color='k', ls='--', lw=2.0)
+plt.xlabel('expected volatility')
+plt.ylabel('expected return')
+plt.colorbar(label='Sharpe ratio')
+plt.show()
